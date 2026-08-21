@@ -4,13 +4,21 @@ An APRS tracker that lives in your terminal. It reads the live [APRS-IS](https:/
 
 ## Install
 
-You need a Rust toolchain.
+If you have a Rust toolchain, install it in one line:
+
+```sh
+cargo install --git https://github.com/benwoody/claprs
+```
+
+Or clone and build:
 
 ```sh
 git clone https://github.com/benwoody/claprs
 cd claprs
 cargo install --path .
 ```
+
+No Rust? Grab a prebuilt binary for macOS, Linux, or Windows from the [releases page](https://github.com/benwoody/claprs/releases).
 
 ## Setup
 
