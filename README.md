@@ -1,65 +1,68 @@
 # claprs
 
-A command line APRS tracker for following stations and areas from your terminal, powered by a read-only [APRS-IS](https://www.aprs-is.net/) connection (with an optional [aprs.fi](https://aprs.fi/) snapshot lookup).
+An APRS tracker that lives in your terminal. It reads the live [APRS-IS](https://www.aprs-is.net/) stream (receive only) and shows you what is on the air near you, or one callsign you care about, with a `top`-style live table if you want one.
 
 ## Install
 
-Requires a Rust toolchain
+You need a Rust toolchain.
 
 ```sh
 git clone https://github.com/benwoody/claprs
 cd claprs
 cargo install --path .
-# or just: cargo run -- <args>
 ```
 
-## Quick start
+## Setup
 
 ```sh
-claprs config set callsign W0ODL     # used for the read-only APRS-IS login
-claprs config set home 32.53,-93.70  # your lat,lon, for `near` and `here`
-
-claprs call W0ODL         # follow one station live (all SSIDs)
-claprs here               # everything within 50 mi of home
-claprs near 25 --unit km  # everything within 25 km of home
-claprs watch W0ODL-7 N5OQT
-claprs feed               # raw live feed around home
-claprs last W0ODL-10      # instant last known position (needs aprs.fi key)
+claprs config set callsign W0ODL     # your call, for the APRS-IS login
+claprs config set home 32.53,-93.70  # your lat,lon
 ```
 
-## Commands
+Neither is strictly required. The login falls back to `N0CALL`, and you can always pass `--from lat,lon`. But setting them makes `here` and the distance column work without extra typing.
 
-| Command | What it does |
-| --- | --- |
-| `call <CALL>` | Follow one station live (SSIDs matched) |
-| `watch <CALL...>` | Combined live feed for a watchlist (TUI table coming soon) |
-| `near <RADIUS>` | Stations within a radius of home, or `--from lat,lon` |
-| `here` | Stations near your saved home (`--radius`, `--unit`) |
-| `feed` | Raw live feed, or a custom `--filter` |
-| `last <CALL>` | Instant last known position via aprs.fi (needs a key) |
-| `config` | `path`, `show`, `get <key>`, `set <key> <value>` |
+## Using it
 
-Run `claprs help` or `claprs <command> --help` for details.
+```sh
+claprs here              # stations within 50 mi of home
+claprs here -t           # same thing as a live, sortable table
+claprs near 100 -t       # wider radius
+claprs call W0ODL        # follow one callsign (all SSIDs)
+claprs watch W0ODL-7 N5OQT -t
+claprs feed              # raw live feed around home
+claprs last W0ODL-10     # last known position via aprs.fi (needs a key)
+```
 
-## Configuration
+Add `-t` to any of the live commands for the full-screen table. Once you are in it:
 
-Values resolve in this order: **command line flag > environment variable > config file**.
+```
+up/dn  move        s  sort (recent / distance)
+/      search      t  cycle type (mobile / wx / fixed / ...)
+enter  detail      o  open the station on aprs.fi
+p      pause       q  quit
+```
 
-| Key | Config file | Env var |
+The table decodes positions, including Mic-E (with speed, course, and altitude), puts a symbol emoji on each station, colors rows by distance, reads weather stations in plain English, and flashes new arrivals green. The detail popup adds bearing from home and a short position trail so you can watch a mobile move.
+
+Drop the `-t` and you get the same decoded data as a scrolling log instead. Add `--raw` to anything to see the untouched APRS-IS lines.
+
+## Config
+
+Values are looked up in this order: command-line flag, then environment variable, then the config file.
+
+| key | config file | env var |
 | --- | --- | --- |
 | callsign | `callsign` | `CLAPRS_CALLSIGN` |
 | home | `home` | `CLAPRS_HOME` |
 | server | `server` | `CLAPRS_SERVER` |
 | aprs.fi key | `aprsfi-key` | `APRSFI_API_KEY` |
 
-The config file lives at the path shown by `claprs config path`. 
+`claprs config path` prints where the file lives, `claprs config show` prints the current values. A free aprs.fi API key (https://aprs.fi/page/api) is only needed for `last`.
 
-Get a free aprs.fi API key at <https://aprs.fi/page/api> (only needed for `last`).
+## A note on APRS-IS
 
-## Being a good neighbor
-
-claprs connects to APRS-IS **receive only** (passcode `-1`, so it can never transmit), opens a **single** connection, and always uses a server side **filter**. That is the sanctioned way to consume APRS-IS. The `last` command uses the aprs.fi web API, which is rate limited, so use it sparingly.
+claprs connects receive only (passcode `-1`, so it physically cannot transmit), holds a single connection, and always sends a server-side filter. That is the normal, expected way to read from APRS-IS. `last` is the only command that touches the aprs.fi web API, which is rate limited, so use it for spot checks rather than in a loop.
 
 ## License
 
-Released under the [MIT License](LICENSE).
+MIT. See [LICENSE](LICENSE).
