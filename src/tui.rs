@@ -8,7 +8,7 @@
 //! Keys: up/down (or j/k) move, `s` sort, `p` pause, `/` search, Enter details,
 //! `q`/Esc quits (or backs out).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::Stdout;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -89,6 +89,8 @@ fn table_loop(
     let mut mode = Mode::Normal;
     let mut query = String::new();
     let mut type_idx = 0usize;
+    let mut pkt_times: VecDeque<Instant> = VecDeque::new();
+    let start = Instant::now();
     let mut state = TableState::default();
     let mut selected: usize = 0;
     let mut detail_call: Option<String> = None;
@@ -97,6 +99,7 @@ fn table_loop(
     loop {
         if !paused {
             while let Ok(p) = rx.try_recv() {
+                pkt_times.push_back(Instant::now());
                 let dist = match (home, p.position) {
                     (Some(h), Some(pp)) => Some(packet::distance_mi(h, pp)),
                     _ => None,
@@ -172,9 +175,16 @@ fn table_loop(
         } else {
             None
         };
+        while pkt_times.front().is_some_and(|t| t.elapsed() > Duration::from_secs(60)) {
+            pkt_times.pop_front();
+        }
+        // Normalize to a real per-minute rate, even before the 60s window fills.
+        let span = start.elapsed().as_secs_f64().clamp(1.0, 60.0);
+        let ppm = (pkt_times.len() as f64 * 60.0 / span).round() as usize;
+        let uniq = entries.len();
         let type_label = TYPE_FILTERS[type_idx].0;
         terminal.draw(|frame| {
-            render(frame, &list, &mut state, home, label, mycall, sort_dist, paused, mode, &query, type_label, detail)
+            render(frame, &list, &mut state, home, label, mycall, sort_dist, paused, mode, &query, type_label, ppm, uniq, detail)
         })?;
 
         if !event::poll(Duration::from_millis(300))? {
@@ -253,6 +263,8 @@ fn render(
     mode: Mode,
     query: &str,
     type_label: &str,
+    ppm: usize,
+    uniq: usize,
     detail: Option<(&String, &Entry)>,
 ) {
     let chunks = Layout::vertical([
@@ -288,6 +300,8 @@ fn render(
         Span::styled(format!("<300 {wide}"), Style::default().fg(Color::White)),
         Span::raw("  "),
         Span::styled(format!("far {far}"), Style::default().fg(Color::DarkGray)),
+        Span::raw("   "),
+        Span::styled(format!("{ppm}/min {uniq}stn"), Style::default().fg(Color::Cyan)),
         Span::raw("   "),
         Span::styled(label, Style::default().fg(Color::Gray)),
     ]);
