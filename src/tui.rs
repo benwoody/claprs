@@ -31,6 +31,7 @@ struct Entry {
     dist: Option<f64>,
     info: String,
     last: Instant,
+    first: Instant,
     trail: Vec<(f64, f64)>,
 }
 
@@ -108,6 +109,7 @@ fn table_loop(
                     dist: None,
                     info: String::new(),
                     last: Instant::now(),
+                    first: Instant::now(),
                     trail: Vec::new(),
                 });
                 // Append to the trail only when the station actually moved.
@@ -296,7 +298,10 @@ fn render(
         .style(Style::default().add_modifier(Modifier::BOLD).fg(Color::Cyan));
     let rows = list.iter().map(|(call, e)| {
         let mine = !mycall.is_empty() && call.to_uppercase().starts_with(mycall);
-        let base = if mine {
+        let base = if e.first.elapsed() < Duration::from_secs(5) {
+            // new-station flash
+            Style::default().fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD)
+        } else if mine {
             Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(dist_color(e.dist))
