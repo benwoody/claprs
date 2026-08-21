@@ -2,10 +2,11 @@
 //!
 //! A background thread reads the APRS-IS stream and feeds parsed packets to the
 //! render loop, which keeps one row per station (latest wins). Rows are colored
-//! by distance, your own callsigns stand out, and the selection scrolls so the
-//! list can be longer than the screen.
+//! by distance, your own callsigns stand out, and the list can be sorted,
+//! paused, searched, and drilled into.
 //!
-//! Keys: up/down (or j/k) move the selection, `s` toggles sort, `q`/Esc quits.
+//! Keys: up/down (or j/k) move, `s` sort, `p` pause, `/` search, Enter details,
+//! `q`/Esc quits (or backs out).
 
 use std::collections::HashMap;
 use std::io::Stdout;
@@ -16,10 +17,10 @@ use anyhow::Result;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind};
-use ratatui::layout::{Constraint, Layout};
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Cell, Paragraph, Row, Table, TableState};
+use ratatui::text::{Line, Span, Text};
+use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Wrap};
 
 use crate::{aprsis, packet};
 
@@ -29,6 +30,13 @@ struct Entry {
     dist: Option<f64>,
     info: String,
     last: Instant,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Mode {
+    Normal,
+    Search,
+    Detail,
 }
 
 /// Run the live table until the user quits.
@@ -50,8 +58,6 @@ pub fn run_table(
         });
     });
 
-    // ratatui::init() enables raw mode, enters the alternate screen, and sets a
-    // panic hook that restores the terminal.
     let mut terminal = ratatui::init();
     let result = table_loop(&mut terminal, &rx, home, &label, &mycall);
     ratatui::restore();
@@ -66,11 +72,13 @@ fn table_loop(
     mycall: &str,
 ) -> Result<()> {
     let mut entries: HashMap<String, Entry> = HashMap::new();
-    let mut sort_dist = false; // default to most-recent
+    let mut sort_dist = false;
     let mut paused = false;
+    let mut mode = Mode::Normal;
+    let mut query = String::new();
     let mut state = TableState::default();
     let mut selected: usize = 0;
-    let mut prev_len: usize = usize::MAX;
+    let mut prev: (usize, u8) = (usize::MAX, 9);
 
     loop {
         if !paused {
@@ -92,7 +100,11 @@ fn table_loop(
             }
         }
 
-        let mut list: Vec<(&String, &Entry)> = entries.iter().collect();
+        let q = query.to_uppercase();
+        let mut list: Vec<(&String, &Entry)> = entries
+            .iter()
+            .filter(|(call, _)| q.is_empty() || call.to_uppercase().contains(&q))
+            .collect();
         if sort_dist {
             list.sort_by(|a, b| match (a.1.dist, b.1.dist) {
                 (Some(x), Some(y)) => x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal),
@@ -112,72 +124,112 @@ fn table_loop(
             state.select(Some(selected));
         }
 
-        // A full clear whenever the row count changes prevents a previous,
-        // shorter frame from ghosting behind the new one.
-        if list.len() != prev_len {
+        // Repaint fully when the row count or mode changes (prevents ghosting,
+        // and clears the detail popup when it closes).
+        let mode_id = mode as u8;
+        if (list.len(), mode_id) != prev {
             terminal.clear()?;
-            prev_len = list.len();
+            prev = (list.len(), mode_id);
         }
 
-        terminal.draw(|frame| render(frame, &list, &mut state, label, mycall, sort_dist, paused))?;
+        terminal.draw(|frame| {
+            render(frame, &list, &mut state, home, label, mycall, sort_dist, paused, mode, &query)
+        })?;
 
-        if event::poll(Duration::from_millis(300))? {
-            if let Event::Key(k) = event::read()? {
-                if k.kind == KeyEventKind::Press {
-                    match k.code {
-                        KeyCode::Char('q') | KeyCode::Esc => break,
-                        KeyCode::Char('s') => sort_dist = !sort_dist,
-                        KeyCode::Char('p') => paused = !paused,
-                        KeyCode::Down | KeyCode::Char('j') => {
-                            if !list.is_empty() {
-                                selected = (selected + 1).min(list.len() - 1);
-                            }
-                        }
-                        KeyCode::Up | KeyCode::Char('k') => {
-                            selected = selected.saturating_sub(1);
-                        }
-                        _ => {}
+        if !event::poll(Duration::from_millis(300))? {
+            continue;
+        }
+        let Event::Key(k) = event::read()? else { continue };
+        if k.kind != KeyEventKind::Press {
+            continue;
+        }
+
+        match mode {
+            Mode::Normal => match k.code {
+                KeyCode::Char('q') | KeyCode::Esc => break,
+                KeyCode::Char('s') => sort_dist = !sort_dist,
+                KeyCode::Char('p') => paused = !paused,
+                KeyCode::Char('/') => mode = Mode::Search,
+                KeyCode::Enter => {
+                    if !list.is_empty() {
+                        mode = Mode::Detail;
                     }
                 }
-            }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if !list.is_empty() {
+                        selected = (selected + 1).min(list.len() - 1);
+                    }
+                }
+                KeyCode::Up | KeyCode::Char('k') => selected = selected.saturating_sub(1),
+                _ => {}
+            },
+            Mode::Search => match k.code {
+                KeyCode::Esc => {
+                    query.clear();
+                    mode = Mode::Normal;
+                }
+                KeyCode::Enter => mode = Mode::Normal,
+                KeyCode::Backspace => {
+                    query.pop();
+                }
+                KeyCode::Char(c) if !c.is_control() => query.push(c),
+                _ => {}
+            },
+            Mode::Detail => match k.code {
+                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => mode = Mode::Normal,
+                _ => {}
+            },
         }
     }
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render(
     frame: &mut ratatui::Frame,
     list: &[(&String, &Entry)],
     state: &mut TableState,
+    home: Option<(f64, f64)>,
     label: &str,
     mycall: &str,
     sort_dist: bool,
     paused: bool,
+    mode: Mode,
+    query: &str,
 ) {
     let chunks = Layout::vertical([
-        Constraint::Length(1), // header
-        Constraint::Min(0),    // table
-        Constraint::Length(1), // footer
+        Constraint::Length(1),
+        Constraint::Min(0),
+        Constraint::Length(1),
     ])
     .split(frame.area());
 
-    // Header bar with a distance-color legend.
-    let label_short: String = label.chars().take(40).collect();
+    // Per-band counts.
+    let (mut near, mut mid, mut wide, mut far) = (0u32, 0u32, 0u32, 0u32);
+    for (_, e) in list {
+        match e.dist {
+            Some(d) if d < 25.0 => near += 1,
+            Some(d) if d < 100.0 => mid += 1,
+            Some(d) if d < 300.0 => wide += 1,
+            _ => far += 1,
+        }
+    }
+
+    // Header: legend with live counts.
+    let label_short: String = label.chars().take(32).collect();
     let head = Line::from(vec![
         Span::styled(
             " claprs ",
             Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD),
         ),
-        Span::raw("  dist: "),
-        Span::styled("<25mi", Style::default().fg(Color::Green)),
-        Span::raw(" "),
-        Span::styled("<100", Style::default().fg(Color::Yellow)),
-        Span::raw(" "),
-        Span::styled("<300", Style::default().fg(Color::White)),
-        Span::raw(" "),
-        Span::styled("far", Style::default().fg(Color::DarkGray)),
         Span::raw("  "),
-        Span::styled("you", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("<25mi {near}"), Style::default().fg(Color::Green)),
+        Span::raw("  "),
+        Span::styled(format!("<100 {mid}"), Style::default().fg(Color::Yellow)),
+        Span::raw("  "),
+        Span::styled(format!("<300 {wide}"), Style::default().fg(Color::White)),
+        Span::raw("  "),
+        Span::styled(format!("far {far}"), Style::default().fg(Color::DarkGray)),
         Span::raw("   "),
         Span::styled(label_short, Style::default().fg(Color::Gray)),
     ]);
@@ -186,7 +238,6 @@ fn render(
     // Table.
     let header = Row::new(["STATION", "TYPE", "POSITION", "DIST", "AGE", "INFO"])
         .style(Style::default().add_modifier(Modifier::BOLD).fg(Color::Cyan));
-
     let rows = list.iter().map(|(call, e)| {
         let mine = !mycall.is_empty() && call.to_uppercase().starts_with(mycall);
         let base = if mine {
@@ -196,18 +247,16 @@ fn render(
         };
         let pos = e.pos.map(|(la, lo)| format!("{la:.4},{lo:.4}")).unwrap_or_default();
         let dist = e.dist.map(|d| format!("{d:.0}mi")).unwrap_or_default();
-        let age = fmt_age(e.last.elapsed().as_secs());
         Row::new(vec![
             Cell::from((*call).clone()),
             Cell::from(e.kind.to_string()),
             Cell::from(pos),
             Cell::from(dist),
-            Cell::from(age),
+            Cell::from(fmt_age(e.last.elapsed().as_secs())),
             Cell::from(e.info.clone()),
         ])
         .style(base)
     });
-
     let widths = [
         Constraint::Length(9),
         Constraint::Length(6),
@@ -216,42 +265,131 @@ fn render(
         Constraint::Length(5),
         Constraint::Min(10),
     ];
-
     let table = Table::new(rows, widths)
         .header(header)
         .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED));
-
     frame.render_stateful_widget(table, chunks[1], state);
 
-    // Footer bar.
-    let sort_label = if sort_dist { "distance" } else { "recent" };
-    let sel = state.selected().map(|i| i + 1).unwrap_or(0);
-    let key = |c| Style::default().fg(c);
-    let mut spans = vec![
-        Span::styled(
-            format!(" {sel}/{} stations ", list.len()),
-            Style::default().fg(Color::Black).bg(Color::Gray),
-        ),
-        Span::raw(format!("  sort: {sort_label}   ")),
-    ];
-    if paused {
-        spans.push(Span::styled(
-            " PAUSED ",
-            Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD),
-        ));
-        spans.push(Span::raw("   "));
+    // Footer changes with mode.
+    let foot = match mode {
+        Mode::Search => Line::from(vec![
+            Span::styled(" search ", Style::default().fg(Color::Black).bg(Color::Cyan)),
+            Span::raw(format!("  {query}_")),
+            Span::styled("   enter", Style::default().fg(Color::Cyan)),
+            Span::raw(" apply  "),
+            Span::styled("esc", Style::default().fg(Color::Cyan)),
+            Span::raw(" clear"),
+        ]),
+        Mode::Detail => Line::from(vec![
+            Span::styled(" detail ", Style::default().fg(Color::Black).bg(Color::Cyan)),
+            Span::raw("   "),
+            Span::styled("esc/enter", Style::default().fg(Color::Cyan)),
+            Span::raw(" close"),
+        ]),
+        Mode::Normal => {
+            let sel = state.selected().map(|i| i + 1).unwrap_or(0);
+            let mut spans = vec![
+                Span::styled(
+                    format!(" {sel}/{} ", list.len()),
+                    Style::default().fg(Color::Black).bg(Color::Gray),
+                ),
+                Span::raw(format!("  sort:{}  ", if sort_dist { "dist" } else { "recent" })),
+            ];
+            if !query.is_empty() {
+                spans.push(Span::styled(format!("filter:{query}  "), Style::default().fg(Color::Yellow)));
+            }
+            if paused {
+                spans.push(Span::styled(
+                    " PAUSED ",
+                    Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD),
+                ));
+                spans.push(Span::raw("  "));
+            }
+            for (kk, lbl) in [("up/dn", "move"), ("s", "sort"), ("p", "pause"), ("/", "search"), ("enter", "detail"), ("q", "quit")] {
+                spans.push(Span::styled(kk, Style::default().fg(Color::Cyan)));
+                spans.push(Span::raw(format!(" {lbl}  ")));
+            }
+            Line::from(spans)
+        }
+    };
+    frame.render_widget(Paragraph::new(foot), chunks[2]);
+
+    // Detail popup.
+    if mode == Mode::Detail {
+        if let Some(i) = state.selected() {
+            if let Some((call, e)) = list.get(i) {
+                draw_detail(frame, call, e, home);
+            }
+        }
     }
-    spans.extend([
-        Span::styled("up/dn", key(Color::Cyan)),
-        Span::raw(" move  "),
-        Span::styled("s", key(Color::Cyan)),
-        Span::raw(" sort  "),
-        Span::styled("p", key(Color::Cyan)),
-        Span::raw(" pause  "),
-        Span::styled("q", key(Color::Cyan)),
-        Span::raw(" quit"),
+}
+
+fn draw_detail(frame: &mut ratatui::Frame, call: &str, e: &Entry, home: Option<(f64, f64)>) {
+    let area = centered_rect(64, 50, frame.area());
+
+    let pos = e
+        .pos
+        .map(|(la, lo)| format!("{la:.5}, {lo:.5}"))
+        .unwrap_or_else(|| "none".to_string());
+    let dist = match (home, e.pos) {
+        (Some(h), Some(p)) => {
+            let d = packet::distance_mi(h, p);
+            let b = bearing(h, p);
+            format!("{d:.1} mi  bearing {b:.0} ({})", compass(b))
+        }
+        _ => "unknown".to_string(),
+    };
+
+    let field = Style::default().fg(Color::Cyan);
+    let text = Text::from(vec![
+        Line::from(vec![Span::styled("Type      ", field), Span::raw(e.kind)]),
+        Line::from(vec![Span::styled("Position  ", field), Span::raw(pos)]),
+        Line::from(vec![Span::styled("Distance  ", field), Span::raw(dist)]),
+        Line::from(vec![
+            Span::styled("Heard     ", field),
+            Span::raw(format!("{} ago", fmt_age(e.last.elapsed().as_secs()))),
+        ]),
+        Line::raw(""),
+        Line::from(vec![Span::styled("Comment", field)]),
+        Line::raw(if e.info.is_empty() { "(none)".to_string() } else { e.info.clone() }),
     ]);
-    frame.render_widget(Paragraph::new(Line::from(spans)), chunks[2]);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(format!(" {call} "))
+        .title_style(Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD));
+
+    frame.render_widget(Clear, area);
+    frame.render_widget(Paragraph::new(text).block(block).wrap(Wrap { trim: true }), area);
+}
+
+fn centered_rect(pct_x: u16, pct_y: u16, area: Rect) -> Rect {
+    let v = Layout::vertical([
+        Constraint::Percentage((100 - pct_y) / 2),
+        Constraint::Percentage(pct_y),
+        Constraint::Percentage((100 - pct_y) / 2),
+    ])
+    .split(area);
+    Layout::horizontal([
+        Constraint::Percentage((100 - pct_x) / 2),
+        Constraint::Percentage(pct_x),
+        Constraint::Percentage((100 - pct_x) / 2),
+    ])
+    .split(v[1])[1]
+}
+
+fn bearing(from: (f64, f64), to: (f64, f64)) -> f64 {
+    let (lat1, lon1) = (from.0.to_radians(), from.1.to_radians());
+    let (lat2, lon2) = (to.0.to_radians(), to.1.to_radians());
+    let dlon = lon2 - lon1;
+    let y = dlon.sin() * lat2.cos();
+    let x = lat1.cos() * lat2.sin() - lat1.sin() * lat2.cos() * dlon.cos();
+    (y.atan2(x).to_degrees() + 360.0) % 360.0
+}
+
+fn compass(deg: f64) -> &'static str {
+    const D: [&str; 8] = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
+    D[(((deg + 22.5) % 360.0) / 45.0) as usize % 8]
 }
 
 fn dist_color(dist: Option<f64>) -> Color {
@@ -259,7 +397,7 @@ fn dist_color(dist: Option<f64>) -> Color {
         Some(d) if d < 25.0 => Color::Green,
         Some(d) if d < 100.0 => Color::Yellow,
         Some(d) if d < 300.0 => Color::White,
-        _ => Color::DarkGray, // very far, or no position at all
+        _ => Color::DarkGray,
     }
 }
 
