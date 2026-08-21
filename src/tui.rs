@@ -66,27 +66,30 @@ fn table_loop(
     mycall: &str,
 ) -> Result<()> {
     let mut entries: HashMap<String, Entry> = HashMap::new();
-    let mut sort_dist = true;
+    let mut sort_dist = false; // default to most-recent
+    let mut paused = false;
     let mut state = TableState::default();
     let mut selected: usize = 0;
     let mut prev_len: usize = usize::MAX;
 
     loop {
-        while let Ok(p) = rx.try_recv() {
-            let dist = match (home, p.position) {
-                (Some(h), Some(pp)) => Some(packet::distance_mi(h, pp)),
-                _ => None,
-            };
-            entries.insert(
-                p.source.clone(),
-                Entry {
-                    kind: p.kind,
-                    pos: p.position,
-                    dist,
-                    info: p.info,
-                    last: Instant::now(),
-                },
-            );
+        if !paused {
+            while let Ok(p) = rx.try_recv() {
+                let dist = match (home, p.position) {
+                    (Some(h), Some(pp)) => Some(packet::distance_mi(h, pp)),
+                    _ => None,
+                };
+                entries.insert(
+                    p.source.clone(),
+                    Entry {
+                        kind: p.kind,
+                        pos: p.position,
+                        dist,
+                        info: p.info,
+                        last: Instant::now(),
+                    },
+                );
+            }
         }
 
         let mut list: Vec<(&String, &Entry)> = entries.iter().collect();
@@ -116,7 +119,7 @@ fn table_loop(
             prev_len = list.len();
         }
 
-        terminal.draw(|frame| render(frame, &list, &mut state, label, mycall, sort_dist))?;
+        terminal.draw(|frame| render(frame, &list, &mut state, label, mycall, sort_dist, paused))?;
 
         if event::poll(Duration::from_millis(300))? {
             if let Event::Key(k) = event::read()? {
@@ -124,6 +127,7 @@ fn table_loop(
                     match k.code {
                         KeyCode::Char('q') | KeyCode::Esc => break,
                         KeyCode::Char('s') => sort_dist = !sort_dist,
+                        KeyCode::Char('p') => paused = !paused,
                         KeyCode::Down | KeyCode::Char('j') => {
                             if !list.is_empty() {
                                 selected = (selected + 1).min(list.len() - 1);
@@ -148,6 +152,7 @@ fn render(
     label: &str,
     mycall: &str,
     sort_dist: bool,
+    paused: bool,
 ) {
     let chunks = Layout::vertical([
         Constraint::Length(1), // header
@@ -156,14 +161,24 @@ fn render(
     ])
     .split(frame.area());
 
-    // Header bar.
-    let label_short: String = label.chars().take(60).collect();
+    // Header bar with a distance-color legend.
+    let label_short: String = label.chars().take(40).collect();
     let head = Line::from(vec![
         Span::styled(
             " claprs ",
             Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD),
         ),
-        Span::raw("  live  "),
+        Span::raw("  dist: "),
+        Span::styled("<25mi", Style::default().fg(Color::Green)),
+        Span::raw(" "),
+        Span::styled("<100", Style::default().fg(Color::Yellow)),
+        Span::raw(" "),
+        Span::styled("<300", Style::default().fg(Color::White)),
+        Span::raw(" "),
+        Span::styled("far", Style::default().fg(Color::DarkGray)),
+        Span::raw("  "),
+        Span::styled("you", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+        Span::raw("   "),
         Span::styled(label_short, Style::default().fg(Color::Gray)),
     ]);
     frame.render_widget(Paragraph::new(head), chunks[0]);
@@ -211,27 +226,40 @@ fn render(
     // Footer bar.
     let sort_label = if sort_dist { "distance" } else { "recent" };
     let sel = state.selected().map(|i| i + 1).unwrap_or(0);
-    let foot = Line::from(vec![
+    let key = |c| Style::default().fg(c);
+    let mut spans = vec![
         Span::styled(
             format!(" {sel}/{} stations ", list.len()),
             Style::default().fg(Color::Black).bg(Color::Gray),
         ),
         Span::raw(format!("  sort: {sort_label}   ")),
-        Span::styled("up/dn", Style::default().fg(Color::Cyan)),
-        Span::raw(" move   "),
-        Span::styled("s", Style::default().fg(Color::Cyan)),
-        Span::raw(" sort   "),
-        Span::styled("q", Style::default().fg(Color::Cyan)),
+    ];
+    if paused {
+        spans.push(Span::styled(
+            " PAUSED ",
+            Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::raw("   "));
+    }
+    spans.extend([
+        Span::styled("up/dn", key(Color::Cyan)),
+        Span::raw(" move  "),
+        Span::styled("s", key(Color::Cyan)),
+        Span::raw(" sort  "),
+        Span::styled("p", key(Color::Cyan)),
+        Span::raw(" pause  "),
+        Span::styled("q", key(Color::Cyan)),
         Span::raw(" quit"),
     ]);
-    frame.render_widget(Paragraph::new(foot), chunks[2]);
+    frame.render_widget(Paragraph::new(Line::from(spans)), chunks[2]);
 }
 
 fn dist_color(dist: Option<f64>) -> Color {
     match dist {
-        Some(d) if d < 15.0 => Color::Green,
-        Some(d) if d < 60.0 => Color::White,
-        _ => Color::DarkGray,
+        Some(d) if d < 25.0 => Color::Green,
+        Some(d) if d < 100.0 => Color::Yellow,
+        Some(d) if d < 300.0 => Color::White,
+        _ => Color::DarkGray, // very far, or no position at all
     }
 }
 
