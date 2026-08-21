@@ -6,6 +6,7 @@
 mod aprsfi;
 mod aprsis;
 mod config;
+mod packet;
 
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
@@ -23,6 +24,10 @@ struct Cli {
     /// Override the callsign used for the (read-only) APRS-IS login
     #[arg(long, global = true)]
     callsign: Option<String>,
+
+    /// Print raw APRS-IS lines instead of the parsed table
+    #[arg(long, global = true)]
+    raw: bool,
 
     #[command(subcommand)]
     command: Commands,
@@ -85,14 +90,9 @@ enum ConfigAction {
     /// Show current configuration
     Show,
     /// Get one value (callsign | home | server | aprsfi-key)
-    Get {
-        key: String,
-    },
+    Get { key: String },
     /// Set one value (callsign | home | server | aprsfi-key)
-    Set {
-        key: String,
-        value: String,
-    },
+    Set { key: String, value: String },
 }
 
 fn main() {
@@ -106,12 +106,13 @@ fn run() -> Result<()> {
     let cli = Cli::parse();
     let g_server = cli.server.clone();
     let g_call = cli.callsign.clone();
+    let g_raw = cli.raw;
 
     match cli.command {
         Commands::Call { callsign } => {
             let call = callsign.to_uppercase();
             let filter = format!("b/{call}*");
-            run_stream(g_server, g_call, filter, format!("following {call}"))
+            run_stream(g_server, g_call, g_raw, filter, format!("following {call}"))
         }
         Commands::Watch { callsigns } => {
             if callsigns.is_empty() {
@@ -123,8 +124,7 @@ fn run() -> Result<()> {
                 .collect::<Vec<_>>()
                 .join("/");
             let filter = format!("b/{buddies}");
-            eprintln!("(note: a rich TUI table is coming; for now this is a combined live feed)\n");
-            run_stream(g_server, g_call, filter, format!("watching {}", callsigns.join(", ")))
+            run_stream(g_server, g_call, g_raw, filter, format!("watching {}", callsigns.join(", ")))
         }
         Commands::Near { radius, from, unit } => {
             let center = match from.or_else(|| Config::load().ok().and_then(|c| c.resolve_home(None))) {
@@ -134,7 +134,7 @@ fn run() -> Result<()> {
             let (lat, lon) = parse_latlon(&center)?;
             let km = to_km(radius, &unit)?;
             let filter = format!("r/{lat:.4}/{lon:.4}/{km:.0}");
-            run_stream(g_server, g_call, filter, format!("within {radius} {unit} of {lat:.4},{lon:.4}"))
+            run_stream(g_server, g_call, g_raw, filter, format!("within {radius} {unit} of {lat:.4},{lon:.4}"))
         }
         Commands::Here { radius, unit } => {
             let center = match Config::load()?.resolve_home(None) {
@@ -144,7 +144,7 @@ fn run() -> Result<()> {
             let (lat, lon) = parse_latlon(&center)?;
             let km = to_km(radius, &unit)?;
             let filter = format!("r/{lat:.4}/{lon:.4}/{km:.0}");
-            run_stream(g_server, g_call, filter, format!("within {radius} {unit} of home ({lat:.4},{lon:.4})"))
+            run_stream(g_server, g_call, g_raw, filter, format!("within {radius} {unit} of home ({lat:.4},{lon:.4})"))
         }
         Commands::Feed { filter } => {
             let filter = match filter {
@@ -158,7 +158,7 @@ fn run() -> Result<()> {
                     format!("r/{lat:.4}/{lon:.4}/160")
                 }
             };
-            run_stream(g_server, g_call, filter.clone(), format!("raw feed · {filter}"))
+            run_stream(g_server, g_call, g_raw, filter.clone(), format!("raw feed · {filter}"))
         }
         Commands::Last { callsign } => {
             let key = match Config::load()?.resolve_aprsfi_key(None) {
@@ -174,14 +174,33 @@ fn run() -> Result<()> {
     }
 }
 
-fn run_stream(cli_server: Option<String>, cli_call: Option<String>, filter: String, label: String) -> Result<()> {
+fn run_stream(
+    cli_server: Option<String>,
+    cli_call: Option<String>,
+    raw: bool,
+    filter: String,
+    label: String,
+) -> Result<()> {
     let cfg = Config::load()?;
     let server = cfg.resolve_server(cli_server);
     let login = cfg.resolve_callsign(cli_call);
+    let home = cfg.resolve_home(None).and_then(|h| parse_latlon(&h).ok());
+
     eprintln!("claprs · {label}");
-    eprintln!("connecting to {server} as {login} (read-only) · filter: {filter} · Ctrl-C to stop\n");
+    eprintln!("connecting to {server} as {login} (read-only) · filter: {filter} · Ctrl-C to stop");
+    if !raw {
+        eprintln!("{}", packet::header());
+    }
+    eprintln!();
+
     aprsis::stream(&server, &login, &filter, |line| {
-        println!("{}  {}", chrono::Local::now().format("%H:%M:%S"), line);
+        if raw {
+            println!("{}  {}", chrono::Local::now().format("%H:%M:%S"), line);
+        } else if let Some(p) = packet::parse(line) {
+            println!("{}", packet::format_line(&p, home));
+        } else {
+            println!("{}  {}", chrono::Local::now().format("%H:%M:%S"), line);
+        }
     })
 }
 
