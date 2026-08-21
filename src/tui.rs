@@ -26,6 +26,7 @@ use crate::{aprsis, packet};
 
 struct Entry {
     kind: &'static str,
+    icon: &'static str,
     pos: Option<(f64, f64)>,
     dist: Option<f64>,
     info: String,
@@ -92,6 +93,7 @@ fn table_loop(
                     p.source.clone(),
                     Entry {
                         kind: p.kind,
+                        icon: p.icon(),
                         pos: p.position,
                         dist,
                         info: p.info,
@@ -170,6 +172,11 @@ fn table_loop(
                     }
                 }
                 KeyCode::Up | KeyCode::Char('k') => selected = selected.saturating_sub(1),
+                KeyCode::Char('o') => {
+                    if let Some((c, _)) = list.get(selected) {
+                        open_url(&format!("https://aprs.fi/#!call=a%2F{c}"));
+                    }
+                }
                 _ => {}
             },
             Mode::Search => match k.code {
@@ -188,6 +195,11 @@ fn table_loop(
                 KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
                     mode = Mode::Normal;
                     detail_call = None;
+                }
+                KeyCode::Char('o') => {
+                    if let Some(c) = &detail_call {
+                        open_url(&format!("https://aprs.fi/#!call=a%2F{c}"));
+                    }
                 }
                 _ => {}
             },
@@ -249,7 +261,7 @@ fn render(
     frame.render_widget(Paragraph::new(head), chunks[0]);
 
     // Table.
-    let header = Row::new(["STATION", "TYPE", "POSITION", "DIST", "AGE", "INFO"])
+    let header = Row::new(["", "STATION", "TYPE", "POSITION", "DIST", "AGE", "INFO"])
         .style(Style::default().add_modifier(Modifier::BOLD).fg(Color::Cyan));
     let rows = list.iter().map(|(call, e)| {
         let mine = !mycall.is_empty() && call.to_uppercase().starts_with(mycall);
@@ -261,6 +273,7 @@ fn render(
         let pos = e.pos.map(|(la, lo)| format!("{la:.4},{lo:.4}")).unwrap_or_default();
         let dist = e.dist.map(|d| format!("{d:.0}mi")).unwrap_or_default();
         Row::new(vec![
+            Cell::from(e.icon),
             Cell::from((*call).clone()),
             Cell::from(e.kind.to_string()),
             Cell::from(pos),
@@ -271,6 +284,7 @@ fn render(
         .style(base)
     });
     let widths = [
+        Constraint::Length(2),
         Constraint::Length(9),
         Constraint::Length(6),
         Constraint::Length(17),
@@ -296,6 +310,8 @@ fn render(
         Mode::Detail => Line::from(vec![
             Span::styled(" detail ", Style::default().fg(Color::Black).bg(Color::Cyan)),
             Span::raw("   "),
+            Span::styled("o", Style::default().fg(Color::Cyan)),
+            Span::raw(" aprs.fi   "),
             Span::styled("esc/enter", Style::default().fg(Color::Cyan)),
             Span::raw(" close"),
         ]),
@@ -318,7 +334,7 @@ fn render(
                 ));
                 spans.push(Span::raw("  "));
             }
-            for (kk, lbl) in [("up/dn", "move"), ("s", "sort"), ("p", "pause"), ("/", "search"), ("enter", "detail"), ("q", "quit")] {
+            for (kk, lbl) in [("up/dn", "move"), ("s", "sort"), ("p", "pause"), ("/", "search"), ("enter", "detail"), ("o", "aprs.fi"), ("q", "quit")] {
                 spans.push(Span::styled(kk, Style::default().fg(Color::Cyan)));
                 spans.push(Span::raw(format!(" {lbl}  ")));
             }
@@ -408,6 +424,16 @@ fn dist_color(dist: Option<f64>) -> Color {
         Some(d) if d < 300.0 => Color::White,
         _ => Color::DarkGray,
     }
+}
+
+/// Open a URL in the default browser (best effort, non-blocking).
+fn open_url(url: &str) {
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").arg(url).spawn();
+    #[cfg(target_os = "linux")]
+    let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+    #[cfg(target_os = "windows")]
+    let _ = std::process::Command::new("cmd").args(["/C", "start", "", url]).spawn();
 }
 
 fn fmt_age(s: u64) -> String {

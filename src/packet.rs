@@ -13,8 +13,21 @@ pub struct Packet {
     pub name: Option<String>,
     /// Decoded position as (lat, lon) in decimal degrees, if present.
     pub position: Option<(f64, f64)>,
+    /// APRS symbol as (table id, symbol code) bytes, if present.
+    pub symbol: Option<(u8, u8)>,
     /// Comment / message text / summary (lossy, trimmed).
     pub info: String,
+}
+
+impl Packet {
+    /// A two-cell-wide emoji for this station's APRS symbol, or two spaces if
+    /// unknown. Every returned string is width 2 so table columns stay aligned.
+    pub fn icon(&self) -> &'static str {
+        match self.symbol {
+            Some((table, code)) => symbol_icon(table, code),
+            None => "  ",
+        }
+    }
 }
 
 /// Parse one APRS-IS line. Returns `None` if it does not look like a packet.
@@ -42,7 +55,7 @@ pub fn parse(line: &str) -> Option<Packet> {
         b'<' => text(source, "caps", &b[1..]),
         b'T' => bare_info(source, "tlm", &b[1..]),
         b'`' | b'\'' => mic_e(source, dest, &b[1..]),
-        b'_' => text(source, "wx", &b[1..]),
+        b'_' => weather_report(source, &b[1..]),
         b'$' => bare(source, "gps"),
         b'?' => text(source, "query", &b[1..]),
         _ => bare_info(source, "?", b),
@@ -73,8 +86,8 @@ pub fn format_line(p: &Packet, home: Option<(f64, f64)>) -> String {
     }
     let info = truncate(&info, 52);
     format!(
-        "{ts}  {:<9}  {:<6}  {:<19}  {:>6}  {}",
-        p.source, p.kind, pos_col, dist_col, info
+        "{ts}  {}  {:<9}  {:<6}  {:<19}  {:>6}  {}",
+        p.icon(), p.source, p.kind, pos_col, dist_col, info
     )
 }
 
@@ -88,9 +101,16 @@ pub fn header() -> String {
 
 fn position(source: &str, rest: &[u8]) -> Packet {
     let mut p = new(source, "pos");
-    if let Some((pos, comment)) = parse_uncompressed(rest).or_else(|| parse_compressed(rest)) {
+    if let Some((pos, sym, comment)) = parse_uncompressed(rest).or_else(|| parse_compressed(rest)) {
         p.position = Some(pos);
-        p.info = comment;
+        p.symbol = Some(sym);
+        if sym.1 == b'_' {
+            // weather station symbol: the comment is a weather report
+            p.kind = "wx";
+            p.info = format_weather(&comment);
+        } else {
+            p.info = comment;
+        }
     } else {
         p.info = lossy(rest);
     }
@@ -104,8 +124,9 @@ fn object(source: &str, rest: &[u8]) -> Packet {
         p.name = Some(lossy(&rest[0..9]));
         let posdata = &rest[17..];
         match parse_uncompressed(posdata).or_else(|| parse_compressed(posdata)) {
-            Some((pos, comment)) => {
+            Some((pos, sym, comment)) => {
                 p.position = Some(pos);
+                p.symbol = Some(sym);
                 p.info = comment;
             }
             None => p.info = lossy(posdata),
@@ -148,6 +169,9 @@ fn mic_e(source: &str, dest: &str, info: &[u8]) -> Packet {
                 }
                 let mut p = new(source, "mic-e");
                 p.position = Some((lat, lon));
+                if info.len() >= 8 {
+                    p.symbol = Some((info[7], info[6])); // table id, symbol code
+                }
                 p.info = parts.join("  ");
                 return p;
             }
@@ -178,19 +202,123 @@ fn new(source: &str, kind: &'static str) -> Packet {
         kind,
         name: None,
         position: None,
+        symbol: None,
         info: String::new(),
     }
 }
 
+/// Map an APRS symbol (table id, code) to a two-cell emoji. Uses only default
+/// emoji-presentation characters (no variation selectors) so every result is
+/// reliably width 2. Keyed mostly on the symbol code; good enough for the
+/// common cases across both tables.
+fn symbol_icon(_table: u8, code: u8) -> &'static str {
+    match code {
+        b'>' => "🚗",
+        b'j' | b'R' => "🚙",
+        b'v' => "🚐",
+        b'k' | b'u' => "🚛",
+        b'U' => "🚌",
+        b'<' => "🛵",
+        b'b' => "🚲",
+        b'[' => "🚶",
+        b'_' | b'W' => "⛅",
+        b'#' => "📡",
+        b'-' | b'y' => "🏠",
+        b'\'' | b'^' => "🛫",
+        b'X' => "🚁",
+        b'O' => "🎈",
+        b's' | b'Y' | b'C' => "⛵",
+        b'a' => "🚑",
+        b'f' => "🚒",
+        b':' => "🔥",
+        b'P' | b'!' => "👮",
+        b'&' | b'I' => "🌐",
+        b'r' => "📻",
+        b'h' => "🏥",
+        _ => "📍",
+    }
+}
+
+// --- weather ----------------------------------------------------------------
+
+/// Positionless weather report (`_` DTI): `_MMDDHHMM` then weather fields.
+fn weather_report(source: &str, rest: &[u8]) -> Packet {
+    let mut p = new(source, "wx");
+    let data = if rest.len() > 8 { &rest[8..] } else { rest };
+    p.info = format_weather(&lossy(data));
+    p
+}
+
+/// Format an APRS weather string, falling back to the raw text if nothing parses.
+fn format_weather(raw: &str) -> String {
+    let s = parse_weather(raw);
+    if s.is_empty() { raw.to_string() } else { s }
+}
+
+/// Parse the common APRS weather fields into a short readable summary.
+fn parse_weather(s: &str) -> String {
+    let b = s.as_bytes();
+    let num = |at: usize, n: usize| -> Option<i32> {
+        b.get(at..at + n)
+            .and_then(|x| std::str::from_utf8(x).ok())
+            .and_then(|x| x.trim().parse().ok())
+    };
+
+    let mut i = 0usize;
+    let (mut wdir, mut wspd) = (None, None);
+    // Leading wind as course/speed: ddd/sss
+    if b.len() >= 7
+        && b[3] == b'/'
+        && b[0..3].iter().all(|c| c.is_ascii_digit())
+        && b[4..7].iter().all(|c| c.is_ascii_digit())
+    {
+        wdir = num(0, 3);
+        wspd = num(4, 3);
+        i = 7;
+    }
+
+    let (mut temp, mut gust, mut hum, mut baro, mut cdir, mut cspd) =
+        (None, None, None, None, None, None);
+    while i < b.len() {
+        match b[i] {
+            b'c' => { cdir = num(i + 1, 3); i += 4; }
+            b's' => { cspd = num(i + 1, 3); i += 4; }
+            b'g' => { gust = num(i + 1, 3); i += 4; }
+            b't' => { temp = num(i + 1, 3); i += 4; }
+            b'h' => { hum = num(i + 1, 2); i += 3; }
+            b'b' => { baro = num(i + 1, 5); i += 6; }
+            b'r' | b'p' | b'P' | b'L' | b'l' | b'S' => i += 4, // rain / luminosity / snow
+            _ => i += 1,
+        }
+    }
+
+    let mut parts = Vec::new();
+    if let Some(t) = temp {
+        parts.push(format!("{t}°F"));
+    }
+    if let (Some(d), Some(sp)) = (wdir.or(cdir), wspd.or(cspd)) {
+        let g = gust.filter(|&g| g > 0).map(|g| format!(" g{g}")).unwrap_or_default();
+        parts.push(format!("wind {sp}mph@{d:03}{g}"));
+    }
+    if let Some(h) = hum {
+        parts.push(format!("hum {}%", if h == 0 { 100 } else { h }));
+    }
+    if let Some(bp) = baro {
+        parts.push(format!("{:.1}hPa", bp as f64 / 10.0));
+    }
+    parts.join("  ")
+}
+
 // --- position formats -------------------------------------------------------
 
-fn parse_uncompressed(b: &[u8]) -> Option<((f64, f64), String)> {
+fn parse_uncompressed(b: &[u8]) -> Option<((f64, f64), (u8, u8), String)> {
     if b.len() < 19 {
         return None;
     }
     let lat = parse_lat(&b[0..8])?;
     let lon = parse_lon(&b[9..18])?;
-    Some(((lat, lon), lossy(&b[19..])))
+    let sym = (b[8], b[18]); // symbol table id, symbol code
+    Some(((lat, lon), sym, lossy(&b[19..])))
 }
 
 fn parse_lat(b: &[u8]) -> Option<f64> {
@@ -217,7 +345,7 @@ fn parse_lon(b: &[u8]) -> Option<f64> {
     Some(if hemi == b'W' { -v } else { v })
 }
 
-fn parse_compressed(b: &[u8]) -> Option<((f64, f64), String)> {
+fn parse_compressed(b: &[u8]) -> Option<((f64, f64), (u8, u8), String)> {
     if b.len() < 13 {
         return None;
     }
@@ -228,7 +356,8 @@ fn parse_compressed(b: &[u8]) -> Option<((f64, f64), String)> {
     if !(-90.0..=90.0).contains(&lat) || !(-180.0..=180.0).contains(&lon) {
         return None;
     }
-    Some(((lat, lon), lossy(&b[13..])))
+    let sym = (b[0], b[9]); // symbol table id, symbol code
+    Some(((lat, lon), sym, lossy(&b[13..])))
 }
 
 fn base91(b: &[u8]) -> Option<u32> {
