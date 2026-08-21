@@ -31,6 +31,7 @@ struct Entry {
     dist: Option<f64>,
     info: String,
     last: Instant,
+    trail: Vec<(f64, f64)>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -89,17 +90,32 @@ fn table_loop(
                     (Some(h), Some(pp)) => Some(packet::distance_mi(h, pp)),
                     _ => None,
                 };
-                entries.insert(
-                    p.source.clone(),
-                    Entry {
-                        kind: p.kind,
-                        icon: p.icon(),
-                        pos: p.position,
-                        dist,
-                        info: p.info,
-                        last: Instant::now(),
-                    },
-                );
+                let icon = p.icon();
+                let e = entries.entry(p.source.clone()).or_insert_with(|| Entry {
+                    kind: p.kind,
+                    icon,
+                    pos: None,
+                    dist: None,
+                    info: String::new(),
+                    last: Instant::now(),
+                    trail: Vec::new(),
+                });
+                // Append to the trail only when the station actually moved.
+                if let Some(pos) = p.position {
+                    if e.trail.last().map_or(true, |&l| l != pos) {
+                        e.trail.push(pos);
+                        let n = e.trail.len();
+                        if n > 12 {
+                            e.trail.drain(0..n - 12);
+                        }
+                    }
+                }
+                e.kind = p.kind;
+                e.icon = icon;
+                e.pos = p.position;
+                e.dist = dist;
+                e.info = p.info;
+                e.last = Instant::now();
             }
         }
 
@@ -350,7 +366,7 @@ fn render(
 }
 
 fn draw_detail(frame: &mut ratatui::Frame, call: &str, e: &Entry, home: Option<(f64, f64)>) {
-    let area = centered_rect(64, 50, frame.area());
+    let area = centered_rect(64, 62, frame.area());
 
     let pos = e
         .pos
@@ -366,7 +382,7 @@ fn draw_detail(frame: &mut ratatui::Frame, call: &str, e: &Entry, home: Option<(
     };
 
     let field = Style::default().fg(Color::Cyan);
-    let text = Text::from(vec![
+    let mut lines = vec![
         Line::from(vec![Span::styled("Type      ", field), Span::raw(e.kind)]),
         Line::from(vec![Span::styled("Position  ", field), Span::raw(pos)]),
         Line::from(vec![Span::styled("Distance  ", field), Span::raw(dist)]),
@@ -375,9 +391,22 @@ fn draw_detail(frame: &mut ratatui::Frame, call: &str, e: &Entry, home: Option<(
             Span::raw(format!("{} ago", fmt_age(e.last.elapsed().as_secs()))),
         ]),
         Line::raw(""),
-        Line::from(vec![Span::styled("Comment", field)]),
+        Line::from(Span::styled("Comment", field)),
         Line::raw(if e.info.is_empty() { "(none)".to_string() } else { e.info.clone() }),
-    ]);
+    ];
+
+    // Trail: positions seen since claprs started watching this station.
+    if e.trail.len() > 1 {
+        let moved: f64 = e.trail.windows(2).map(|w| packet::distance_mi(w[0], w[1])).sum();
+        lines.push(Line::raw(""));
+        lines.push(Line::from(Span::styled(
+            format!("Trail  {} points, {moved:.1} mi moved (newest first)", e.trail.len()),
+            field,
+        )));
+        for &(la, lo) in e.trail.iter().rev().take(6) {
+            lines.push(Line::raw(format!("  {la:.4}, {lo:.4}")));
+        }
+    }
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -385,7 +414,7 @@ fn draw_detail(frame: &mut ratatui::Frame, call: &str, e: &Entry, home: Option<(
         .title_style(Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD));
 
     frame.render_widget(Clear, area);
-    frame.render_widget(Paragraph::new(text).block(block).wrap(Wrap { trim: true }), area);
+    frame.render_widget(Paragraph::new(Text::from(lines)).block(block).wrap(Wrap { trim: true }), area);
 }
 
 fn centered_rect(pct_x: u16, pct_y: u16, area: Rect) -> Rect {
