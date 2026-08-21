@@ -1,2 +1,7 @@
 /target
 ROADMAP.md
+
+# mirror ssh key, never commit
+codeberg_mirror
+codeberg_mirror.pub
+*.pem

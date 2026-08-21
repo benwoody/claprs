@@ -16,7 +16,7 @@ cargo install --path .
 
 ```sh
 claprs config set callsign W0ODL     # your call, for the APRS-IS login
-claprs config set home 32.53,-93.70  # your lat,lon
+claprs config set home 34.05,-118.24  # your lat,lon (here: Los Angeles, a busy APRS area)
 ```
 
 Neither is strictly required. The login falls back to `N0CALL`, and you can always pass `--from lat,lon`. But setting them makes `here` and the distance column work without extra typing.
@@ -42,9 +42,18 @@ enter  detail      o  open the station on aprs.fi
 p      pause       q  quit
 ```
 
-The table decodes positions, including Mic-E (with speed, course, and altitude), puts a symbol emoji on each station, colors rows by distance, reads weather stations in plain English, and flashes new arrivals green. The detail popup adds bearing from home and a short position trail so you can watch a mobile move.
+The --table (-t) view decodes positions as:
 
-Drop the `-t` and you get the same decoded data as a scrolling log instead. Add `--raw` to anything to see the untouched APRS-IS lines.
+* a symbol emoji on each station
+* colors rows by distance
+* reads weather station data
+* flashes new arrivals green.
+
+The detail popup adds bearing from home and a short position trail so you can watch a mobile station move.
+
+Drop the `-t` and you get the same decoded data as a scrolling log instead. 
+
+Add `--raw` to anything to see the untouched APRS-IS lines.
 
 ## Config
 
@@ -57,7 +66,9 @@ Values are looked up in this order: command-line flag, then environment variable
 | server | `server` | `CLAPRS_SERVER` |
 | aprs.fi key | `aprsfi-key` | `APRSFI_API_KEY` |
 
-`claprs config path` prints where the file lives, `claprs config show` prints the current values. A free aprs.fi API key (https://aprs.fi/page/api) is only needed for `last`.
+`claprs config path` prints where the file lives, `claprs config show` prints the current values. 
+
+A free aprs.fi API key (https://aprs.fi/page/api) is only needed for `last`.
 
 ## A note on APRS-IS
 

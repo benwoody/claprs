@@ -1,0 +1,23 @@
+name: Mirror to Codeberg
+on: [push, delete]
+concurrency: mirror
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone source
+        run: git clone --bare https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git src
+
+      - name: Push to Codeberg
+        env:
+          SSH_KEY: ${{ secrets.CODEBERG_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan codeberg.org >> ~/.ssh/known_hosts
+          cd src
+          git push --force --prune \
+            git@codeberg.org:benwoody/${{ github.event.repository.name }}.git \
+            'refs/heads/*:refs/heads/*' 'refs/tags/*:refs/tags/*'
