@@ -1,9 +1,8 @@
 //! A small, panic-free APRS packet parser and pretty printer.
 //!
-//! This is intentionally partial: it decodes the common cases (uncompressed and
-//! compressed position reports, objects, messages, status) into a clean line,
-//! and gracefully labels everything else (Mic-E, telemetry, weather, ...) rather
-//! than trying to fully decode it. Anything it cannot parse falls back to raw.
+//! Decodes the common cases (uncompressed, compressed, and Mic-E position
+//! reports, plus objects, messages, status) into a clean line, and gracefully
+//! labels everything else. Anything it cannot parse falls back to raw.
 
 /// A decoded APRS packet (only the fields we display).
 pub struct Packet {
@@ -21,31 +20,32 @@ pub struct Packet {
 /// Parse one APRS-IS line. Returns `None` if it does not look like a packet.
 pub fn parse(line: &str) -> Option<Packet> {
     let (header, payload) = line.split_once(':')?;
-    let source = header.split_once('>')?.0.to_string();
+    let (source, after) = header.split_once('>')?;
+    let dest = after.split(',').next().unwrap_or("");
     if source.is_empty() || payload.is_empty() {
         return None;
     }
     let b = payload.as_bytes();
     let pkt = match b[0] {
-        b'!' | b'=' => position(&source, &b[1..]),
+        b'!' | b'=' => position(source, &b[1..]),
         b'@' | b'/' => {
             if b.len() >= 8 {
-                position(&source, &b[8..]) // skip 7-char timestamp
+                position(source, &b[8..]) // skip 7-char timestamp
             } else {
-                bare(&source, "pos")
+                bare(source, "pos")
             }
         }
-        b';' => object(&source, &b[1..]),
-        b')' => bare_info(&source, "item", &b[1..]),
-        b':' => message(&source, &b[1..]),
-        b'>' => text(&source, "status", &b[1..]),
-        b'<' => text(&source, "caps", &b[1..]),
-        b'T' => bare_info(&source, "tlm", &b[1..]),
-        b'`' | b'\'' => bare_info(&source, "mic-e", &b[1..]),
-        b'_' => text(&source, "wx", &b[1..]),
-        b'$' => bare(&source, "gps"),
-        b'?' => text(&source, "query", &b[1..]),
-        _ => bare_info(&source, "?", b),
+        b';' => object(source, &b[1..]),
+        b')' => bare_info(source, "item", &b[1..]),
+        b':' => message(source, &b[1..]),
+        b'>' => text(source, "status", &b[1..]),
+        b'<' => text(source, "caps", &b[1..]),
+        b'T' => bare_info(source, "tlm", &b[1..]),
+        b'`' | b'\'' => mic_e(source, dest, &b[1..]),
+        b'_' => text(source, "wx", &b[1..]),
+        b'$' => bare(source, "gps"),
+        b'?' => text(source, "query", &b[1..]),
+        _ => bare_info(source, "?", b),
     };
     Some(pkt)
 }
@@ -56,7 +56,7 @@ pub fn format_line(p: &Packet, home: Option<(f64, f64)>) -> String {
     let (pos_col, dist_col) = match p.position {
         Some((la, lo)) => {
             let d = home
-                .map(|h| format!("{:>4.0}mi", haversine_mi(h, (la, lo))))
+                .map(|h| format!("{:>4.0}mi", distance_mi(h, (la, lo))))
                 .unwrap_or_default();
             (format!("{la:>8.4},{lo:>9.4}"), d)
         }
@@ -87,13 +87,7 @@ pub fn header() -> String {
 }
 
 fn position(source: &str, rest: &[u8]) -> Packet {
-    let mut p = Packet {
-        source: source.into(),
-        kind: "pos",
-        name: None,
-        position: None,
-        info: String::new(),
-    };
+    let mut p = new(source, "pos");
     if let Some((pos, comment)) = parse_uncompressed(rest).or_else(|| parse_compressed(rest)) {
         p.position = Some(pos);
         p.info = comment;
@@ -106,20 +100,17 @@ fn position(source: &str, rest: &[u8]) -> Packet {
 fn object(source: &str, rest: &[u8]) -> Packet {
     // ;NAME(9) + flag(1) + timestamp(7) + position
     if rest.len() >= 18 {
-        let name = lossy(&rest[0..9]);
+        let mut p = new(source, "obj");
+        p.name = Some(lossy(&rest[0..9]));
         let posdata = &rest[17..];
-        let (position, info) = match parse_uncompressed(posdata).or_else(|| parse_compressed(posdata))
-        {
-            Some((pos, comment)) => (Some(pos), comment),
-            None => (None, lossy(posdata)),
-        };
-        Packet {
-            source: source.into(),
-            kind: "obj",
-            name: Some(name),
-            position,
-            info,
+        match parse_uncompressed(posdata).or_else(|| parse_compressed(posdata)) {
+            Some((pos, comment)) => {
+                p.position = Some(pos);
+                p.info = comment;
+            }
+            None => p.info = lossy(posdata),
         }
+        p
     } else {
         bare_info(source, "obj", rest)
     }
@@ -128,29 +119,58 @@ fn object(source: &str, rest: &[u8]) -> Packet {
 fn message(source: &str, rest: &[u8]) -> Packet {
     // ADDRESSEE(9) + ':' + text
     if rest.len() >= 10 && rest[9] == b':' {
-        Packet {
-            source: source.into(),
-            kind: "msg",
-            name: Some(lossy(&rest[0..9])),
-            position: None,
-            info: lossy(&rest[10..]),
-        }
+        let mut p = new(source, "msg");
+        p.name = Some(lossy(&rest[0..9]));
+        p.info = lossy(&rest[10..]);
+        p
     } else {
         bare_info(source, "msg", rest)
     }
 }
 
-fn text(source: &str, kind: &'static str, rest: &[u8]) -> Packet {
-    Packet {
-        source: source.into(),
-        kind,
-        name: None,
-        position: None,
-        info: lossy(rest),
+fn mic_e(source: &str, dest: &str, info: &[u8]) -> Packet {
+    let d = dest.as_bytes();
+    if d.len() >= 6 {
+        if let Some((lat, north, offset, west)) = decode_mic_e_dest(&d[0..6]) {
+            if let Some((lon, speed, course, comment)) = decode_mic_e_info(info, offset, west) {
+                let lat = if north { lat } else { -lat };
+                let info = if speed > 0 {
+                    let head = format!("{speed}kt {course:03}°");
+                    if comment.is_empty() {
+                        head
+                    } else {
+                        format!("{head}  {comment}")
+                    }
+                } else {
+                    comment
+                };
+                let mut p = new(source, "mic-e");
+                p.position = Some((lat, lon));
+                p.info = info;
+                return p;
+            }
+        }
     }
+    bare_info(source, "mic-e", info)
+}
+
+fn text(source: &str, kind: &'static str, rest: &[u8]) -> Packet {
+    let mut p = new(source, kind);
+    p.info = lossy(rest);
+    p
 }
 
 fn bare(source: &str, kind: &'static str) -> Packet {
+    new(source, kind)
+}
+
+fn bare_info(source: &str, kind: &'static str, rest: &[u8]) -> Packet {
+    let mut p = new(source, kind);
+    p.info = lossy(rest);
+    p
+}
+
+fn new(source: &str, kind: &'static str) -> Packet {
     Packet {
         source: source.into(),
         kind,
@@ -160,15 +180,7 @@ fn bare(source: &str, kind: &'static str) -> Packet {
     }
 }
 
-fn bare_info(source: &str, kind: &'static str, rest: &[u8]) -> Packet {
-    Packet {
-        source: source.into(),
-        kind,
-        name: None,
-        position: None,
-        info: lossy(rest),
-    }
-}
+// --- position formats -------------------------------------------------------
 
 fn parse_uncompressed(b: &[u8]) -> Option<((f64, f64), String)> {
     if b.len() < 19 {
@@ -231,7 +243,88 @@ fn base91(b: &[u8]) -> Option<u32> {
     Some(v)
 }
 
-fn haversine_mi(a: (f64, f64), b: (f64, f64)) -> f64 {
+// --- Mic-E ------------------------------------------------------------------
+
+/// Decode the 6-char Mic-E destination: (abs latitude, north?, lon offset?, west?).
+fn decode_mic_e_dest(d: &[u8]) -> Option<(f64, bool, bool, bool)> {
+    let mut digits = [0u8; 6];
+    for (i, &c) in d.iter().enumerate().take(6) {
+        digits[i] = match c {
+            b'0'..=b'9' => c - b'0',
+            b'A'..=b'J' => c - b'A',
+            b'P'..=b'Y' => c - b'P',
+            b'K' | b'L' | b'Z' => 0, // ambiguity / space
+            _ => return None,
+        };
+    }
+    let is_high = |c: u8| (b'P'..=b'Z').contains(&c);
+    let north = is_high(d[3]);
+    let offset = is_high(d[4]);
+    let west = is_high(d[5]);
+
+    let deg = digits[0] as f64 * 10.0 + digits[1] as f64;
+    let min = digits[2] as f64 * 10.0 + digits[3] as f64 + (digits[4] as f64 * 10.0 + digits[5] as f64) / 100.0;
+    let lat = deg + min / 60.0;
+    if lat > 90.0 {
+        return None;
+    }
+    Some((lat, north, offset, west))
+}
+
+/// Decode the Mic-E info field: (signed longitude, speed kt, course deg, comment).
+fn decode_mic_e_info(info: &[u8], offset: bool, west: bool) -> Option<(f64, i32, i32, String)> {
+    if info.len() < 8 {
+        return None;
+    }
+    let mut lon_deg = info[0] as i32 - 28;
+    if offset {
+        lon_deg += 100;
+    }
+    if (180..=189).contains(&lon_deg) {
+        lon_deg -= 80;
+    } else if (190..=199).contains(&lon_deg) {
+        lon_deg -= 190;
+    }
+    if !(0..=179).contains(&lon_deg) {
+        return None;
+    }
+    let mut lon_min = info[1] as i32 - 28;
+    if lon_min >= 60 {
+        lon_min -= 60;
+    }
+    if !(0..=59).contains(&lon_min) {
+        return None;
+    }
+    let lon_hun = info[2] as i32 - 28;
+    if !(0..=99).contains(&lon_hun) {
+        return None;
+    }
+    let mut lon = lon_deg as f64 + (lon_min as f64 + lon_hun as f64 / 100.0) / 60.0;
+    if west {
+        lon = -lon;
+    }
+
+    let mut speed = (info[3] as i32 - 28) * 10 + (info[4] as i32 - 28) / 10;
+    if speed >= 800 {
+        speed -= 800;
+    }
+    let mut course = ((info[4] as i32 - 28) % 10) * 100 + (info[5] as i32 - 28);
+    if course >= 400 {
+        course -= 400;
+    }
+
+    let comment = if info.len() > 8 {
+        lossy(&info[8..])
+    } else {
+        String::new()
+    };
+    Some((lon, speed, course, comment))
+}
+
+// --- helpers ----------------------------------------------------------------
+
+/// Great-circle distance in statute miles between two (lat, lon) points.
+pub fn distance_mi(a: (f64, f64), b: (f64, f64)) -> f64 {
     const R_MI: f64 = 3958.7613;
     let (lat1, lon1) = a;
     let (lat2, lon2) = b;
@@ -242,8 +335,17 @@ fn haversine_mi(a: (f64, f64), b: (f64, f64)) -> f64 {
     2.0 * R_MI * h.sqrt().asin()
 }
 
+/// Decode bytes to display text. Each byte maps to one Latin-1 character, and
+/// every control character (C0 and C1) becomes a space, so raw APRS payload
+/// bytes (Mic-E symbol/telemetry bytes, stray ESC, high bytes, etc.) can never
+/// move the cursor or corrupt the terminal.
 fn lossy(b: &[u8]) -> String {
-    String::from_utf8_lossy(b).trim().to_string()
+    let s: String = b
+        .iter()
+        .map(|&byte| byte as char)
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    s.trim().to_string()
 }
 
 fn truncate(s: &str, max: usize) -> String {

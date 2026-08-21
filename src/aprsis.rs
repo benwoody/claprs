@@ -35,11 +35,8 @@ pub fn stream(
     let reader = BufReader::new(stream);
     for line in reader.lines() {
         let line = line.context("reading from APRS-IS")?;
-        if let Some(rest) = line.strip_prefix('#') {
-            if rest.contains("logresp") {
-                eprintln!("[aprs-is]{rest}");
-            }
-            continue;
+        if line.starts_with('#') {
+            continue; // server comment / keepalive
         }
         on_line(&line);
     }

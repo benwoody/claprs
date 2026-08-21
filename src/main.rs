@@ -7,6 +7,7 @@ mod aprsfi;
 mod aprsis;
 mod config;
 mod packet;
+mod tui;
 
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
@@ -29,6 +30,10 @@ struct Cli {
     #[arg(long, global = true)]
     raw: bool,
 
+    /// Show a live full-screen table instead of a scrolling log
+    #[arg(long, short = 't', global = true)]
+    table: bool,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -40,7 +45,7 @@ enum Commands {
         /// Callsign to follow
         callsign: String,
     },
-    /// Live feed for a watchlist of callsigns (rich TUI table coming soon)
+    /// Live feed for a watchlist of callsigns (pairs well with -t)
     Watch {
         /// Callsigns to watch
         callsigns: Vec<String>,
@@ -104,15 +109,17 @@ fn main() {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
-    let g_server = cli.server.clone();
-    let g_call = cli.callsign.clone();
-    let g_raw = cli.raw;
+    let opts = StreamOpts {
+        server: cli.server.clone(),
+        callsign: cli.callsign.clone(),
+        raw: cli.raw,
+        table: cli.table,
+    };
 
     match cli.command {
         Commands::Call { callsign } => {
             let call = callsign.to_uppercase();
-            let filter = format!("b/{call}*");
-            run_stream(g_server, g_call, g_raw, filter, format!("following {call}"))
+            run_stream(opts, format!("b/{call}*"), format!("following {call}"))
         }
         Commands::Watch { callsigns } => {
             if callsigns.is_empty() {
@@ -123,8 +130,7 @@ fn run() -> Result<()> {
                 .map(|c| format!("{}*", c.to_uppercase()))
                 .collect::<Vec<_>>()
                 .join("/");
-            let filter = format!("b/{buddies}");
-            run_stream(g_server, g_call, g_raw, filter, format!("watching {}", callsigns.join(", ")))
+            run_stream(opts, format!("b/{buddies}"), format!("watching {}", callsigns.join(", ")))
         }
         Commands::Near { radius, from, unit } => {
             let center = match from.or_else(|| Config::load().ok().and_then(|c| c.resolve_home(None))) {
@@ -133,8 +139,7 @@ fn run() -> Result<()> {
             };
             let (lat, lon) = parse_latlon(&center)?;
             let km = to_km(radius, &unit)?;
-            let filter = format!("r/{lat:.4}/{lon:.4}/{km:.0}");
-            run_stream(g_server, g_call, g_raw, filter, format!("within {radius} {unit} of {lat:.4},{lon:.4}"))
+            run_stream(opts, format!("r/{lat:.4}/{lon:.4}/{km:.0}"), format!("within {radius} {unit} of {lat:.4},{lon:.4}"))
         }
         Commands::Here { radius, unit } => {
             let center = match Config::load()?.resolve_home(None) {
@@ -143,8 +148,7 @@ fn run() -> Result<()> {
             };
             let (lat, lon) = parse_latlon(&center)?;
             let km = to_km(radius, &unit)?;
-            let filter = format!("r/{lat:.4}/{lon:.4}/{km:.0}");
-            run_stream(g_server, g_call, g_raw, filter, format!("within {radius} {unit} of home ({lat:.4},{lon:.4})"))
+            run_stream(opts, format!("r/{lat:.4}/{lon:.4}/{km:.0}"), format!("within {radius} {unit} of home ({lat:.4},{lon:.4})"))
         }
         Commands::Feed { filter } => {
             let filter = match filter {
@@ -158,7 +162,7 @@ fn run() -> Result<()> {
                     format!("r/{lat:.4}/{lon:.4}/160")
                 }
             };
-            run_stream(g_server, g_call, g_raw, filter.clone(), format!("raw feed · {filter}"))
+            run_stream(opts, filter.clone(), format!("feed · {filter}"))
         }
         Commands::Last { callsign } => {
             let key = match Config::load()?.resolve_aprsfi_key(None) {
@@ -174,27 +178,32 @@ fn run() -> Result<()> {
     }
 }
 
-fn run_stream(
-    cli_server: Option<String>,
-    cli_call: Option<String>,
+struct StreamOpts {
+    server: Option<String>,
+    callsign: Option<String>,
     raw: bool,
-    filter: String,
-    label: String,
-) -> Result<()> {
+    table: bool,
+}
+
+fn run_stream(opts: StreamOpts, filter: String, label: String) -> Result<()> {
     let cfg = Config::load()?;
-    let server = cfg.resolve_server(cli_server);
-    let login = cfg.resolve_callsign(cli_call);
+    let server = cfg.resolve_server(opts.server);
+    let login = cfg.resolve_callsign(opts.callsign);
     let home = cfg.resolve_home(None).and_then(|h| parse_latlon(&h).ok());
+
+    if opts.table {
+        return tui::run_table(server, login, filter, home, label);
+    }
 
     eprintln!("claprs · {label}");
     eprintln!("connecting to {server} as {login} (read-only) · filter: {filter} · Ctrl-C to stop");
-    if !raw {
+    if !opts.raw {
         eprintln!("{}", packet::header());
     }
     eprintln!();
 
     aprsis::stream(&server, &login, &filter, |line| {
-        if raw {
+        if opts.raw {
             println!("{}  {}", chrono::Local::now().format("%H:%M:%S"), line);
         } else if let Some(p) = packet::parse(line) {
             println!("{}", packet::format_line(&p, home));
