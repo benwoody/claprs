@@ -461,11 +461,55 @@ fn parse_mic_e_comment(b: &[u8]) -> (Option<i32>, String) {
             let (c0, c1, c2) = (b[i - 3], b[i - 2], b[i - 1]);
             if [c0, c1, c2].iter().all(|&c| (33..=126).contains(&c)) {
                 let alt = (c0 as i32 - 33) * 8281 + (c1 as i32 - 33) * 91 + (c2 as i32 - 33) - 10000;
-                return (Some(alt), lossy(&b[i + 1..]));
+                return (Some(alt), strip_mic_e_extras(&lossy(&b[i + 1..])));
             }
         }
     }
-    (None, lossy(b))
+    (None, strip_mic_e_extras(&lossy(b)))
+}
+
+/// Remove Mic-E trailing extras that some radios append after the human comment:
+/// base-91 telemetry (`|..|`) and the DAO datum/precision extension (`!w..!`).
+fn strip_mic_e_extras(s: &str) -> String {
+    let mut out = s.to_string();
+
+    // Leading Mic-E radio/type byte (Kenwood '>' or ']', Yaesu '`' or '\'').
+    if matches!(out.chars().next(), Some('>' | ']' | '`' | '\'')) {
+        out.remove(0);
+    }
+
+    // Telemetry and other Mic-E extras always sit at the end: cut from the
+    // first '|' (base-91 telemetry marker, paired or not).
+    if let Some(a) = out.find('|') {
+        out.truncate(a);
+    }
+
+    // DAO extension: ! + (w|W) + 2 chars + !
+    let dao = {
+        let b = out.as_bytes();
+        (0..b.len().saturating_sub(4)).find(|&i| {
+            b[i] == b'!' && (b[i + 1] == b'w' || b[i + 1] == b'W') && b[i + 4] == b'!'
+        })
+    };
+    if let Some(i) = dao {
+        out.replace_range(i..i + 5, "");
+    }
+
+    out = out.trim().to_string();
+
+    // A clearly space-separated trailing "_X" symbol token (e.g. "... path  _4").
+    if let Some(idx) = out.rfind(" _") {
+        if out[idx + 2..].chars().count() <= 1 {
+            out.truncate(idx);
+        }
+    }
+
+    let mut out = out.trim().to_string();
+    // A lone "_X" token as the whole comment is just noise.
+    if out.starts_with('_') && out.chars().count() <= 2 {
+        out.clear();
+    }
+    out
 }
 
 // --- helpers ----------------------------------------------------------------
