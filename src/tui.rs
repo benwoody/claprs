@@ -41,6 +41,15 @@ enum Mode {
     Detail,
 }
 
+/// Type filters cycled with `t`. `None` means show everything.
+const TYPE_FILTERS: [(&str, Option<&str>); 5] = [
+    ("all", None),
+    ("mobile", Some("mic-e")),
+    ("weather", Some("wx")),
+    ("fixed", Some("pos")),
+    ("object", Some("obj")),
+];
+
 /// Run the live table until the user quits.
 pub fn run_table(
     server: String,
@@ -78,6 +87,7 @@ fn table_loop(
     let mut paused = false;
     let mut mode = Mode::Normal;
     let mut query = String::new();
+    let mut type_idx = 0usize;
     let mut state = TableState::default();
     let mut selected: usize = 0;
     let mut detail_call: Option<String> = None;
@@ -120,9 +130,11 @@ fn table_loop(
         }
 
         let q = query.to_uppercase();
+        let type_kind = TYPE_FILTERS[type_idx].1;
         let mut list: Vec<(&String, &Entry)> = entries
             .iter()
             .filter(|(call, _)| q.is_empty() || call.to_uppercase().contains(&q))
+            .filter(|(_, e)| type_kind.map_or(true, |k| e.kind == k))
             .collect();
         if sort_dist {
             list.sort_by(|a, b| match (a.1.dist, b.1.dist) {
@@ -158,8 +170,9 @@ fn table_loop(
         } else {
             None
         };
+        let type_label = TYPE_FILTERS[type_idx].0;
         terminal.draw(|frame| {
-            render(frame, &list, &mut state, home, label, mycall, sort_dist, paused, mode, &query, detail)
+            render(frame, &list, &mut state, home, label, mycall, sort_dist, paused, mode, &query, type_label, detail)
         })?;
 
         if !event::poll(Duration::from_millis(300))? {
@@ -193,6 +206,7 @@ fn table_loop(
                         open_url(&format!("https://aprs.fi/#!call=a%2F{c}"));
                     }
                 }
+                KeyCode::Char('t') => type_idx = (type_idx + 1) % TYPE_FILTERS.len(),
                 _ => {}
             },
             Mode::Search => match k.code {
@@ -236,6 +250,7 @@ fn render(
     paused: bool,
     mode: Mode,
     query: &str,
+    type_label: &str,
     detail: Option<(&String, &Entry)>,
 ) {
     let chunks = Layout::vertical([
@@ -343,6 +358,9 @@ fn render(
             if !query.is_empty() {
                 spans.push(Span::styled(format!("filter:{query}  "), Style::default().fg(Color::Yellow)));
             }
+            if type_label != "all" {
+                spans.push(Span::styled(format!("type:{type_label}  "), Style::default().fg(Color::Yellow)));
+            }
             if paused {
                 spans.push(Span::styled(
                     " PAUSED ",
@@ -350,7 +368,7 @@ fn render(
                 ));
                 spans.push(Span::raw("  "));
             }
-            for (kk, lbl) in [("up/dn", "move"), ("s", "sort"), ("p", "pause"), ("/", "search"), ("enter", "detail"), ("o", "aprs.fi"), ("q", "quit")] {
+            for (kk, lbl) in [("up/dn", "move"), ("s", "sort"), ("t", "type"), ("p", "pause"), ("/", "search"), ("enter", "detail"), ("o", "aprs.fi"), ("q", "quit")] {
                 spans.push(Span::styled(kk, Style::default().fg(Color::Cyan)));
                 spans.push(Span::raw(format!(" {lbl}  ")));
             }
