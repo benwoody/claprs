@@ -78,6 +78,7 @@ fn table_loop(
     let mut query = String::new();
     let mut state = TableState::default();
     let mut selected: usize = 0;
+    let mut detail_call: Option<String> = None;
     let mut prev: (usize, u8) = (usize::MAX, 9);
 
     loop {
@@ -132,8 +133,15 @@ fn table_loop(
             prev = (list.len(), mode_id);
         }
 
+        // Pin the detail popup to a callsign, not a row index, so a re-sort
+        // caused by a fresh packet cannot swap what we are looking at.
+        let detail = if mode == Mode::Detail {
+            detail_call.as_ref().and_then(|c| entries.get_key_value(c))
+        } else {
+            None
+        };
         terminal.draw(|frame| {
-            render(frame, &list, &mut state, home, label, mycall, sort_dist, paused, mode, &query)
+            render(frame, &list, &mut state, home, label, mycall, sort_dist, paused, mode, &query, detail)
         })?;
 
         if !event::poll(Duration::from_millis(300))? {
@@ -151,7 +159,8 @@ fn table_loop(
                 KeyCode::Char('p') => paused = !paused,
                 KeyCode::Char('/') => mode = Mode::Search,
                 KeyCode::Enter => {
-                    if !list.is_empty() {
+                    if let Some((c, _)) = list.get(selected) {
+                        detail_call = Some((*c).clone());
                         mode = Mode::Detail;
                     }
                 }
@@ -176,7 +185,10 @@ fn table_loop(
                 _ => {}
             },
             Mode::Detail => match k.code {
-                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => mode = Mode::Normal,
+                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
+                    mode = Mode::Normal;
+                    detail_call = None;
+                }
                 _ => {}
             },
         }
@@ -196,6 +208,7 @@ fn render(
     paused: bool,
     mode: Mode,
     query: &str,
+    detail: Option<(&String, &Entry)>,
 ) {
     let chunks = Layout::vertical([
         Constraint::Length(1),
@@ -314,13 +327,9 @@ fn render(
     };
     frame.render_widget(Paragraph::new(foot), chunks[2]);
 
-    // Detail popup.
-    if mode == Mode::Detail {
-        if let Some(i) = state.selected() {
-            if let Some((call, e)) = list.get(i) {
-                draw_detail(frame, call, e, home);
-            }
-        }
+    // Detail popup, pinned to a callsign (see table_loop) so it stays put.
+    if let Some((call, e)) = detail {
+        draw_detail(frame, call, e, home);
     }
 }
 
