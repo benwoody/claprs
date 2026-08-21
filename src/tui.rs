@@ -228,8 +228,8 @@ fn render(
         }
     }
 
-    // Header: legend with live counts.
-    let label_short: String = label.chars().take(32).collect();
+    // Header: legend with live counts. The label is clipped to the terminal
+    // width automatically by the Paragraph, so it is never cut mid-number here.
     let head = Line::from(vec![
         Span::styled(
             " claprs ",
@@ -244,7 +244,7 @@ fn render(
         Span::raw("  "),
         Span::styled(format!("far {far}"), Style::default().fg(Color::DarkGray)),
         Span::raw("   "),
-        Span::styled(label_short, Style::default().fg(Color::Gray)),
+        Span::styled(label, Style::default().fg(Color::Gray)),
     ]);
     frame.render_widget(Paragraph::new(head), chunks[0]);
 

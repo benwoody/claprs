@@ -148,7 +148,7 @@ fn run() -> Result<()> {
             };
             let (lat, lon) = parse_latlon(&center)?;
             let km = to_km(radius, &unit)?;
-            run_stream(opts, format!("r/{lat:.4}/{lon:.4}/{km:.0}"), format!("within {radius} {unit} of home ({lat:.4},{lon:.4})"))
+            run_stream(opts, format!("r/{lat:.4}/{lon:.4}/{km:.0}"), format!("within {radius} {unit} of home"))
         }
         Commands::Feed { filter } => {
             let filter = match filter {

@@ -132,21 +132,23 @@ fn mic_e(source: &str, dest: &str, info: &[u8]) -> Packet {
     let d = dest.as_bytes();
     if d.len() >= 6 {
         if let Some((lat, north, offset, west)) = decode_mic_e_dest(&d[0..6]) {
-            if let Some((lon, speed, course, comment)) = decode_mic_e_info(info, offset, west) {
+            if let Some((lon, speed, course, alt, comment)) = decode_mic_e_info(info, offset, west) {
                 let lat = if north { lat } else { -lat };
-                let info = if speed > 0 {
-                    let head = format!("{speed}kt {course:03}°");
-                    if comment.is_empty() {
-                        head
-                    } else {
-                        format!("{head}  {comment}")
+                let mut parts: Vec<String> = Vec::new();
+                if speed > 0 {
+                    parts.push(format!("{speed}kt {course:03}°"));
+                }
+                if let Some(a) = alt {
+                    if (-1000..=60000).contains(&a) {
+                        parts.push(format!("{a}m"));
                     }
-                } else {
-                    comment
-                };
+                }
+                if !comment.is_empty() {
+                    parts.push(comment);
+                }
                 let mut p = new(source, "mic-e");
                 p.position = Some((lat, lon));
-                p.info = info;
+                p.info = parts.join("  ");
                 return p;
             }
         }
@@ -271,8 +273,8 @@ fn decode_mic_e_dest(d: &[u8]) -> Option<(f64, bool, bool, bool)> {
     Some((lat, north, offset, west))
 }
 
-/// Decode the Mic-E info field: (signed longitude, speed kt, course deg, comment).
-fn decode_mic_e_info(info: &[u8], offset: bool, west: bool) -> Option<(f64, i32, i32, String)> {
+/// Decode the Mic-E info field: (signed longitude, speed kt, course deg, altitude m, comment).
+fn decode_mic_e_info(info: &[u8], offset: bool, west: bool) -> Option<(f64, i32, i32, Option<i32>, String)> {
     if info.len() < 8 {
         return None;
     }
@@ -313,12 +315,28 @@ fn decode_mic_e_info(info: &[u8], offset: bool, west: bool) -> Option<(f64, i32,
         course -= 400;
     }
 
-    let comment = if info.len() > 8 {
-        lossy(&info[8..])
+    let (alt, comment) = if info.len() > 8 {
+        parse_mic_e_comment(&info[8..])
     } else {
-        String::new()
+        (None, String::new())
     };
-    Some((lon, speed, course, comment))
+    Some((lon, speed, course, alt, comment))
+}
+
+/// Pull an optional altitude out of the Mic-E comment tail and return the clean
+/// text. Altitude is 3 base-91 chars followed by `}` (relative to -10000 m),
+/// usually right after a leading type byte; we drop that whole group.
+fn parse_mic_e_comment(b: &[u8]) -> (Option<i32>, String) {
+    for i in 3..b.len().min(7) {
+        if b[i] == b'}' {
+            let (c0, c1, c2) = (b[i - 3], b[i - 2], b[i - 1]);
+            if [c0, c1, c2].iter().all(|&c| (33..=126).contains(&c)) {
+                let alt = (c0 as i32 - 33) * 8281 + (c1 as i32 - 33) * 91 + (c2 as i32 - 33) - 10000;
+                return (Some(alt), lossy(&b[i + 1..]));
+            }
+        }
+    }
+    (None, lossy(b))
 }
 
 // --- helpers ----------------------------------------------------------------
