@@ -19,5 +19,5 @@ jobs:
           ssh-keyscan codeberg.org >> ~/.ssh/known_hosts
           cd src
           git push --force --prune \
-            git@codeberg.org:benwoody/${{ github.event.repository.name }}.git \
+            git@codeberg.org:bendoubleu/${{ github.event.repository.name }}.git \
             'refs/heads/*:refs/heads/*' 'refs/tags/*:refs/tags/*'
