@@ -289,7 +289,7 @@ fn render(
     // width automatically by the Paragraph, so it is never cut mid-number here.
     let head = Line::from(vec![
         Span::styled(
-            " claprs ",
+            " clAPRS ",
             Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),

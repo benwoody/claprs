@@ -1,6 +1,6 @@
 [package]
 name = "claprs"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Command line APRS tracker for following stations and areas from your terminal via APRS-IS"
 license = "MIT"
